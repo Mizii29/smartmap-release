@@ -219,12 +219,12 @@
               </div>
             </div>
           </div>
-          <div v-if="!editingId" class="animation-option">
+          <div v-if="!editingId && !mediaPreviews.some(item => item.mediaType === 'image')" class="animation-option" >
             <label class="animation-toggle">
               <input v-model="form.generateAnimationImage" type="checkbox" />
-              <span>同时生成一段旅游动画小视频</span>
+              <span>根据文字生成旅游动画</span>
             </label>
-            <p>勾选后，保存日记时会结合文字描述和上传图片生成旅游动画小视频。</p>
+            <p>勾选后，保存日记时会仅根据日记文字生成旅游动画小视频。</p>
           </div>
           <div v-if="errorMsg" class="error-msg">{{ errorMsg }}</div>
           <button type="submit" :disabled="submitting" class="submit-btn">
@@ -296,7 +296,7 @@
               class="media-input"
               @change="handleAIMediaChange"
             />
-            <span class="tag-hint">最多 10 张图片，生成日记时会一起保存，生成动画小视频时会作为参考素材</span>
+            <span class="tag-hint">最多 10 张图片，生成日记时会一起保存</span>
             <div v-if="aiMediaPreviews.length" class="media-preview-list">
               <div v-for="(item, idx) in aiMediaPreviews" :key="item.url" class="media-preview-item">
                 <img :src="item.url" alt="" @click="openImageViewer(item.url, 'AI 日记图片')" />
@@ -305,10 +305,10 @@
               </div>
             </div>
           </div>
-          <div class="animation-option">
+          <div v-if="!aiMediaPreviews.length" class="animation-option">
             <label class="animation-toggle">
               <input v-model="aiForm.generateAnimationImage" type="checkbox" />
-              <span>同时生成一段旅游动画小视频</span>
+              <span>根据文字生成旅游动画</span>
             </label>
             <p>勾选后，点击下方“立即生成并保存”会额外生成一段旅游动画小视频，并和日记一起保存。</p>
           </div>
@@ -564,6 +564,7 @@
 </template>
 
 <script setup lang="ts">
+import { apiFetch as fetch } from '../apiFetch'
 import { ref, onMounted, onBeforeUnmount, reactive, watch, computed } from 'vue'
 import { useRouter } from 'vue-router'
 

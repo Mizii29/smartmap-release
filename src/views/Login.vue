@@ -49,6 +49,7 @@
 </template>
 
 <script setup lang="ts">
+import { apiFetch as fetch } from '../apiFetch'
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 

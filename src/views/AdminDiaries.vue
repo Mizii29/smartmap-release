@@ -146,6 +146,7 @@
 </template>
 
 <script setup lang="ts">
+import { apiFetch as fetch } from '../apiFetch'
 import { onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 
@@ -311,7 +312,8 @@ function goDiary() {
   router.push('/diary')
 }
 
-function logout() {
+async function logout() {
+  await fetch('/api/logout', {method:'POST'}).catch(() => {})
   localStorage.removeItem('token')
   localStorage.removeItem('user')
   router.push('/login')

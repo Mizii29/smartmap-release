@@ -44,7 +44,7 @@
         <div class="page-header">
           <div>
             <h1>🧭 行程规划</h1>
-            <p>把多位一体推荐、完整路线、旅拍服务和当前旅程状态整合到一个页面里。</p>
+            <p>把多位一体推荐、完整路线和当前旅程状态整合到一个页面里。</p>
           </div>
           <div class="page-header-actions">
             <button class="page-action-btn primary" type="button" @click="fetchSmartItinerary">立即生成行程</button>
@@ -156,7 +156,6 @@
               <p>已对接 `/api/smartItinerary` 与多点路线规划。</p>
             </div>
             <div class="section-actions">
-              <button class="page-chip-btn" type="button" @click="rerunSmartItinerary">重新搜索旅拍</button>
               <button v-if="hasRoute && !journeyActive" class="page-chip-btn strong" type="button" @click="openJourneySetup">开始旅程</button>
             </div>
           </div>
@@ -263,7 +262,7 @@
           <header class="discover-hero">
             <div>
               <h1>✨ 发现</h1>
-              <p>探索热门景点、美食与旅拍服务</p>
+              <p>探索热门景点、美食</p>
             </div>
             <button class="discover-refresh-btn" type="button" @click="refreshDiscoverPage">刷新发现页</button>
           </header>
@@ -275,7 +274,7 @@
                 v-model="searchQuery"
                 class="discover-search-input"
                 type="search"
-                placeholder="搜索景点、美食、旅拍服务..."
+                placeholder="搜索景点、美食..."
                 @input="onSearchInput"
                 @focus="searchFocused = true"
                 @blur="onSearchBlur"
@@ -314,19 +313,6 @@
                   <small>{{ food.cuisine || food.address || '美食' }}</small>
                 </button>
               </div>
-              <div v-if="searchServiceResults.length > 0" class="discover-search-group">
-                <div class="discover-search-title">📸 旅拍服务</div>
-                <button
-                  v-for="svc in searchServiceResults"
-                  :key="'discover-s' + svc.id"
-                  class="discover-search-item"
-                  type="button"
-                  @mousedown.prevent="selectSearchService(svc)"
-                >
-                  <span>{{ svc.name }}</span>
-                  <small>{{ getServiceTypeLabel(svc.type) }}</small>
-                </button>
-              </div>
             </div>
             <div v-if="searchFocused && searchQuery.trim() && searchPoiResults.length === 0 && searchFoodResults.length === 0 && searchServiceResults.length === 0 && !searchLoading" class="discover-search-empty">
               未找到相关结果
@@ -338,7 +324,7 @@
               <span>距离基准</span>
               <strong>{{ discoverDistanceAnchorLabel }}</strong>
             </div>
-            <p>在上方搜索并点选地点后，景点、美食和旅拍服务会按它附近重新排序。</p>
+            <p>在上方搜索并点选地点后，景点、美食会按它附近重新排序。</p>
             <button class="discover-filter-btn slim" type="button" @click="useCurrentLocationAsDiscoverAnchor">用当前位置</button>
           </div>
 
@@ -506,60 +492,6 @@
           </div>
         </section>
 
-        <section ref="discoverServicesRef" class="discover-section discover-services-section">
-          <div class="discover-section-head">
-            <div>
-              <h2>📸 旅拍服务</h2>
-              <p>摄影师、妆娘、无人机和服装租赁集中展示，支持路线规划。</p>
-            </div>
-            <button class="discover-filter-btn" type="button" @click="fetchTravelServices">刷新服务</button>
-          </div>
-          <div class="discover-filter-row">
-            <button
-              v-for="type in discoverServiceTypes"
-              :key="type.value"
-              class="discover-filter-btn pill"
-              :class="{ active: activeServiceType === type.value }"
-              type="button"
-              @click="activeServiceType = type.value"
-            >
-              {{ type.label }}
-            </button>
-          </div>
-          <div v-if="filteredDiscoverServiceItems.length === 0" class="discover-empty">暂无旅拍服务数据，请检查 travel_services 表或点击“刷新服务”重新加载。</div>
-          <div v-else class="discover-service-grid">
-            <article
-              v-for="item in filteredDiscoverServiceItems"
-              :key="item.uid"
-              class="discover-service-card"
-              @click="openDiscoverDetail(item)"
-            >
-              <div class="service-title-row">
-                <div class="service-icon-box">{{ item.icon }}</div>
-                <button
-                  class="discover-fav-btn"
-                  :class="{ active: isDiscoverFavorite(item) }"
-                  type="button"
-                  @click.stop="toggleDiscoverFavorite(item)"
-                  :aria-label="isDiscoverFavorite(item) ? '取消收藏' : '收藏'"
-                  :title="isDiscoverFavorite(item) ? '取消收藏' : '收藏'"
-                >
-                  {{ isDiscoverFavorite(item) ? '★' : '☆' }}
-                </button>
-              </div>
-              <h3>{{ item.name }}</h3>
-              <p>{{ item.description }}</p>
-              <div class="service-meta-line">
-                <span>⭐ {{ (item.rating ? item.rating.toFixed(1) : '暂无评分') }}</span>
-                <span>🔥 热度 {{ Math.round(item.hotness) }}</span>
-                <span>{{ formatDiscoverDistance(item.distance) }}</span>
-              </div>
-              <div class="service-card-actions">
-                <button class="discover-secondary-mini" type="button" @click.stop="addDiscoverItemToJourney(item)">📋 加入行程</button>
-              </div>
-            </article>
-          </div>
-        </section>
         </div>
       </div>
     </div>
@@ -872,7 +804,7 @@
             @focus="searchFocused = true"
             @blur="onSearchBlur"
             @keydown.escape="searchFocused = false"
-            placeholder="搜索景点、美食、妆娘、摄影师..."
+            placeholder="搜索景点、美食..."
             class="search-input"
           />
           <span v-if="searchQuery && !searchLoading" class="search-clear" @click="clearSearch">✕</span>
@@ -906,21 +838,6 @@
               <span class="search-item-name">{{ food.name }}</span>
               <span class="search-item-cuisine">{{ food.cuisine }}</span>
               <span class="search-item-addr" v-if="food.address">· {{ food.address }}</span>
-            </div>
-          </div>
-          <div v-if="searchServiceResults.length > 0" class="search-group">
-            <div class="search-group-title">🛎️ 旅拍服务</div>
-            <div
-              v-for="svc in searchServiceResults"
-              :key="'s' + svc.id"
-              class="search-item"
-              @mousedown.prevent="selectSearchService(svc)"
-            >
-              <span class="search-item-name">{{ svc.name }}</span>
-              <span class="search-item-addr">
-                {{ getServiceTypeLabel(svc.type) }}
-              </span>
-              <span class="search-item-hot">{{ svc.hotness }}</span>
             </div>
           </div>
         </div>
@@ -977,7 +894,6 @@
         <button :class="{ active: activeRecommendationDrawer === 'style' }" @click="openStyleRecommend" class="style-btn">🧭 多位一体推荐</button>
         <button :class="{ active: activeRecommendationDrawer === 'personal' }" @click="fetchPersonalRecommend" class="personal-btn">⭐ 个性化推荐</button>
         <button :class="{ active: activeRecommendationDrawer === 'food' }" @click="fetchFoodRecommendations" class="food-btn">🍽️ 美食推荐</button>
-        <button :class="{ active: activeRecommendationDrawer === 'service' }" @click="fetchTravelServices" class="service-btn">📸 旅拍服务</button>
       </div>
 
       <div v-if="showStylePanel" class="style-panel">
@@ -1077,7 +993,7 @@
         </div>
       </div>
 
-      <div v-if="panelView === 'map'" class="status-panel" v-html="statusMessage"></div>
+      <div v-if="panelView === 'map'" class="status-panel" >{{ statusMessage.replace(/<[^>]*>/g, '') }}</div>
 
       <div v-if="panelView === 'map'" class="sidebar-spacer"></div>
 
@@ -1086,7 +1002,7 @@
         <div class="itinerary-empty-box">
           <div class="itinerary-empty-icon">🧭</div>
           <div class="itinerary-empty-text">尚未添加行程</div>
-          <div class="itinerary-empty-hint">去发现页加入景点、美食或旅拍吧！</div>
+          <div class="itinerary-empty-hint">去发现页加入景点或美食。</div>
         </div>
       </div>
 
@@ -1253,25 +1169,6 @@
               <div class="food-actions">
                 <button class="food-set-end-btn" @click.stop="setFoodAsEnd(food)">📍 设为终点</button>
                 <a v-if="food.dianpingUrl" :href="food.dianpingUrl" target="_blank" rel="noopener noreferrer" class="food-dp-link" @click.stop>大众点评 ↗</a>
-              </div>
-            </article>
-          </template>
-
-          <template v-else-if="activeRecommendationDrawer === 'service'">
-            <div v-if="travelServices.length === 0" class="recommend-empty">还没有旅拍服务结果，点击左侧旅拍服务生成。</div>
-            <article
-              v-for="service in travelServices"
-              :key="'drawer-service-' + service.id"
-              class="service-item recommend-service-card"
-              :class="'service-' + service.type"
-            >
-              <div class="service-header">
-                <span class="service-icon">{{ getServiceIcon(service.type) }}</span>
-                <span class="service-name">{{ service.name }}</span>
-                <span class="service-hotness">♥ {{ service.hotness }}</span>
-              </div>
-              <div class="service-actions">
-                <button class="book-status set-end" @click.stop="setServiceAsEnd(service)">📍 设为终点</button>
               </div>
             </article>
           </template>
@@ -1801,6 +1698,7 @@
 </template>
 
 <script setup lang="ts">
+import { apiFetch as fetch } from '../apiFetch'
 import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import BaseMap from '@/components/BaseMap.vue'
@@ -1942,7 +1840,6 @@ interface DiscoverInteractionState {
 const discoverSectionTabs: Array<{ value: DiscoverSection; label: string }> = [
   { value: 'spots', label: '🏛️ 景点' },
   { value: 'foods', label: '🍽️ 美食' },
-  { value: 'services', label: '📸 旅拍服务' }
 ]
 const activeDiscoverSection = ref<DiscoverSection>('spots')
 const activeDiscoverSpotSort = ref<DiscoverSpotSort>('hotness')
@@ -2066,7 +1963,6 @@ const profilePreferenceGroups = computed(() => {
     { key: 'diary', label: '📖 日记', items: diaryRows },
     { key: 'spots', label: '🏛️ 景点', items: mapDiscoverPreferenceItems(discoverSpotItems.value) },
     { key: 'foods', label: '🍽️ 美食', items: mapDiscoverPreferenceItems(filteredDiscoverFoodItems.value) },
-    { key: 'services', label: '📸 旅拍服务', items: mapDiscoverPreferenceItems(filteredDiscoverServiceItems.value) }
   ]
 })
 const profilePreferenceKinds = [
@@ -2379,7 +2275,7 @@ function onSearchInput() {
       const d = json.data || json
       searchPoiResults.value = d.pois || []
       searchFoodResults.value = d.foods || []
-      searchServiceResults.value = d.services || []
+      searchServiceResults.value = []
     } catch {
       if (requestId !== searchRequestSeq) return
       searchPoiResults.value = []
@@ -2853,7 +2749,7 @@ function onPoseImgError(e: Event) {
 }
 
 const showFlowchart = ref(false)
-const showCampusNavModal = ref(false)
+
 
 async function ensureStyleOptions() {
   if (availableStyles.value.length > 0) return
@@ -3586,7 +3482,6 @@ async function refreshDiscoverPage() {
     await Promise.all([
       fetchRecommendations('hotness'),
       fetchFoodRecommendations(),
-      fetchTravelServices()
     ])
     await refreshVisibleDiscoverInteractions()
   } catch (error: any) {
@@ -3634,15 +3529,6 @@ async function switchMainTab(tab: MainTab) {
   }
 }
 
-function goToCampusNav(_campusId: string) {
-  showCampusNavModal.value = false
-  router.push({ name: 'CampusNav' })
-}
-
-function goToScenicNav(_scenicId: string) {
-  showCampusNavModal.value = false
-  router.push({ name: 'ScenicNav' })
-}
 
 const currentStageIndex = computed(() => {
   if (!journeyStartTime.value || journeyStages.value.length === 0) return 0

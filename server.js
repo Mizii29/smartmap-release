@@ -1,5 +1,6 @@
 // 1. 在 ESM 中，dotenv 的最快加载方式
 import 'dotenv/config';
+import { rateLimit } from 'express-rate-limit';
 import bcrypt from 'bcryptjs';
 import express from 'express';
 import multer from 'multer';
@@ -136,7 +137,6 @@ const AVATAR_IMAGE_MAX_BYTES = Number.parseInt(process.env.AVATAR_IMAGE_MAX_BYTE
 const MINIMAX_API_KEY = process.env.MINIMAX_API_KEY || '';
 const MINIMAX_API_BASE_URL = (process.env.MINIMAX_API_BASE_URL || 'https://api.minimaxi.com').replace(/\/$/, '');
 const MINIMAX_T2V_MODEL = process.env.MINIMAX_T2V_MODEL || process.env.MINIMAX_VIDEO_MODEL || 'MiniMax-Hailuo-2.3';
-const MINIMAX_I2V_MODEL = process.env.MINIMAX_I2V_MODEL || process.env.MINIMAX_VIDEO_MODEL || 'MiniMax-Hailuo-2.3-Fast';
 const MINIMAX_VIDEO_DURATION = Number.parseInt(process.env.MINIMAX_VIDEO_DURATION || '6', 10) || 6;
 const MINIMAX_VIDEO_RESOLUTION = process.env.MINIMAX_VIDEO_RESOLUTION || '768P';
 const MINIMAX_VIDEO_POLL_INTERVAL_MS = Number.parseInt(process.env.MINIMAX_VIDEO_POLL_INTERVAL_MS || '8000', 10) || 8000;
@@ -259,6 +259,8 @@ const pool = new Pool({
     password: process.env.DB_PASSWORD,
     port: parseInt(process.env.DB_PORT || '5432'),
     ssl: ['127.0.0.1', 'localhost', '::1'].includes(process.env.DB_HOST) ? false : { rejectUnauthorized: true },
+    statement_timeout: 10000,
+    idle_in_transaction_session_timeout: 10000,
     connectionTimeoutMillis: 15000,
     max: 20,
     idleTimeoutMillis: 30000,
@@ -462,8 +464,18 @@ async function connectWithRetry(retries = 3) {
             const client = await pool.connect();
             client.release();
             console.log('✅ 成功连接到 PostgreSQL 17.9 数据库');
-            await ensureDiscoverSchema();
-            await ensureDiaryGeneratedSchema();
+            if (process.env.SMARTMAP_MIGRATE === '1') {
+                await ensureDiscoverSchema();
+                await ensureDiaryGeneratedSchema();
+                await pool.query('CREATE EXTENSION IF NOT EXISTS pg_trgm');
+                await pool.end();
+                return;
+            }
+            const { rows } = await pool.query('SELECT rolsuper, rolcreatedb, rolcreaterole FROM pg_roles WHERE rolname=current_user');
+            if (rows[0].rolsuper || rows[0].rolcreatedb || rows[0].rolcreaterole) {
+                throw Error('Use a restricted runtime database account');
+            }
+            await pool.query("UPDATE diary_animation_tasks SET status='failed', error_message='图片生成视频已停用' WHERE (mode='i2v' OR EXISTS (SELECT 1 FROM diary_media m WHERE m.diary_id=diary_animation_tasks.diary_id AND m.media_type='image')) AND status IN ('queued','processing')");
             processPendingAnimationTasks().catch(err => console.error('[动画任务] 启动处理失败:', err.message));
             setInterval(() => {
                 processPendingAnimationTasks().catch(err => console.error('[动画任务] 定时处理失败:', err.message));
@@ -476,12 +488,12 @@ async function connectWithRetry(retries = 3) {
                 console.log(`  等待 ${delay}ms 后重试...`);
                 await new Promise(r => setTimeout(r, delay));
             } else {
-                console.error('  已达最大重试次数，请检查数据库状态');
+                throw err;
             }
         }
     }
 }
-connectWithRetry();
+
 
 // 数据库连接池错误处理与自动重连
 pool.on('error', (err) => {
@@ -499,11 +511,50 @@ if (!JWT_SECRET || JWT_SECRET.length < 32) throw Error('Set a strong JWT_SECRET 
 const JWT_EXPIRES_IN = '24h';
 
 // 中间件配置
+app.disable('x-powered-by');
 app.use((req, res, next) => {
-    res.header('Access-Control-Allow-Origin', '*');
+    const host = req.hostname;
+    if (!['localhost','127.0.0.1','[::1]'].includes(host)) return res.sendStatus(403);
+    const origin = req.get('origin');
+    if (origin && origin !== 'http://' + req.get('host')) return res.sendStatus(403);
+    res.set({'X-Content-Type-Options':'nosniff','X-Frame-Options':'DENY','Referrer-Policy':'same-origin'});
     next();
 });
+const limit = (windowMs, max) => rateLimit({windowMs, limit: max, standardHeaders: 'draft-7', legacyHeaders: false,
+    message: {success: false, error: '请求过于频繁，请稍后再试'}});
+app.use(['/api/login','/api/register'], limit(60000, 12));
+app.use('/api', limit(60000, 240));
+app.use('/api', (req, res, next) => {
+    if (['/login','/register'].includes(req.path)) return next();
+    const asset = /^\/(?:media\/\d+\/content|users\/\d+\/avatar)$/.test(req.path);
+    if (asset && !req.headers.authorization) {
+        const session = (req.headers.cookie || '').split('; ').find(part => part.startsWith('smartmap_asset='));
+        if (session) req.headers.authorization = 'Bearer ' + session.slice('smartmap_asset='.length);
+    }
+    return authMiddleware(req, res, () => {
+        if (!asset && ['GET','POST'].includes(req.method) && req.path !== '/logout') {
+            res.cookie('smartmap_asset', req.headers.authorization.slice(7), {path:'/api', httpOnly:true, sameSite:'strict'});
+        }
+        next();
+    });
+});
 
+app.use(['/api/ai','/api/diaries/generate','/api/diaries/generate-with-media','/api/diaries/with-media'], limit(60000, 8));
+const coordinate = (value, max) => typeof value === 'string' && /^-?\d{1,3}(?:\.\d{1,16})?$/.test(value) && Math.abs(Number(value)) <= max;
+app.use(['/api/fastRoute','/api/route'], (req,res,next) => {
+    const q=req.query;
+    if (!coordinate(q.startLat,90) || !coordinate(q.endLat,90) || !coordinate(q.startLng,180) || !coordinate(q.endLng,180)) return res.sendStatus(400);
+    next();
+});
+app.use('/api/multiRoute', (req,res,next) => {
+    const points = typeof req.query.points === 'string' ? req.query.points.split(';') : [];
+    if (points.length < 2 || points.length > 20 || !points.every(p => {
+        const pair = p.split(',');
+        return pair.length===2 && coordinate(pair[0],180) && coordinate(pair[1],90);
+    })) return res.sendStatus(400);
+    next();
+});
+app.use('/uploads', (_req,res) => res.sendStatus(404));
 // 托管 public 文件夹
 app.use(express.static(path.join(__dirname, 'public')));
 app.use(express.static(path.join(__dirname, 'dist')));
@@ -521,14 +572,16 @@ app.get('/api/media/:id/content', async (req, res) => {
         if (!Number.isSafeInteger(expires) || expires < Date.now() || signature !== mediaSignature(mediaId, expires)) {
             return res.sendStatus(403);
         }
+        res.setHeader('Content-Security-Policy', "sandbox; default-src 'none'");
         res.setHeader('Cache-Control', 'private, no-store');
         res.setHeader('X-Content-Type-Options', 'nosniff');
         const mediaRes = await pool.query(
             `SELECT m.id, m.url, m.original_name, m.mime_type, c.content
              FROM diary_media m
              LEFT JOIN diary_media_content c ON c.media_id = m.id
-             WHERE m.id = $1`,
-            [mediaId]
+             JOIN diaries d ON d.id = m.diary_id
+             WHERE m.id = $1 AND (d.is_public OR d.user_id=$2 OR $3)`,
+            [mediaId, req.user.id, req.user.role === 'admin']
         );
         if (mediaRes.rows.length === 0) {
             return res.status(404).send('媒体不存在');
@@ -976,9 +1029,9 @@ function toClientUser(row, role = 'user') {
 
 const avatarUpload = multer({
     storage: multer.memoryStorage(),
-    limits: { fileSize: AVATAR_IMAGE_MAX_BYTES },
+    limits: { fileSize: AVATAR_IMAGE_MAX_BYTES, fields: 4, parts: 5, fieldSize: 4096 },
     fileFilter: (_req, file, cb) => {
-        if (!file.mimetype || !file.mimetype.startsWith('image/')) {
+        if (!['image/jpeg','image/png','image/webp','image/gif'].includes(file.mimetype)) {
             return cb(new Error('头像只能上传图片文件'));
         }
         cb(null, true);
@@ -1001,11 +1054,12 @@ const diaryMediaUpload = multer({
         filename: (_req, file, cb) => cb(null, `${Date.now()}-${crypto.randomUUID()}${getDiaryMediaExt(file)}`)
     }),
     limits: {
+        fields: 20, parts: 30, fieldSize: 65536,
         files: Number.isFinite(DIARY_MEDIA_MAX_FILES) ? DIARY_MEDIA_MAX_FILES : 9,
         fileSize: DIARY_VIDEO_MAX_BYTES
     },
     fileFilter: (_req, file, cb) => {
-        if (!getDiaryMediaType(file.mimetype)) {
+        if (!['image/jpeg','image/png','image/webp','image/gif','video/mp4','video/webm','video/quicktime'].includes(file.mimetype)) {
             return cb(new Error('只支持图片或视频文件'));
         }
         cb(null, true);
@@ -1325,39 +1379,12 @@ function buildMiniMaxAnimationPrompt(diary) {
     return prompt.substring(0, 2000);
 }
 
-async function getDiaryImageAsBase64(mediaRow) {
-    if (!mediaRow || mediaRow.media_type !== 'image') return null;
-    try {
-        const contentRes = await pool.query(
-            'SELECT content FROM diary_media_content WHERE media_id = $1',
-            [mediaRow.id]
-        );
-        const buffer = Buffer.isBuffer(contentRes.rows?.[0]?.content) ? contentRes.rows[0].content : null;
-        if (buffer && buffer.length > 0) {
-            const mime = typeof mediaRow.mime_type === 'string' && mediaRow.mime_type ? mediaRow.mime_type : 'image/jpeg';
-            return `data:${mime};base64,${buffer.toString('base64')}`;
-        }
-
-        const filePath = getDiaryFilePathFromUrl(mediaRow.url);
-        if (!filePath) return null;
-        const data = await fs.promises.readFile(filePath);
-        await upsertDiaryMediaContent(mediaRow.id, data);
-        const ext = path.extname(filePath).toLowerCase().replace('.', '');
-        const mime = `image/${ext === 'jpg' ? 'jpeg' : ext || 'jpeg'}`;
-        return `data:${mime};base64,${data.toString('base64')}`;
-    } catch (error) {
-        console.error(`[MiniMax] 读取图片失败: ${mediaRow?.id}`, error.message);
-        return null;
-    }
-}
-
-async function createMiniMaxVideoTask(payload) {
+async function createMiniMaxVideoTask(prompt) {
     if (!MINIMAX_API_KEY) {
         throw new Error('未配置 MiniMax API Key');
     }
 
-    const isI2V = typeof payload?.first_frame_image === 'string' && payload.first_frame_image.length > 0;
-    const model = payload?.model || (isI2V ? MINIMAX_I2V_MODEL : MINIMAX_T2V_MODEL);
+    const model = MINIMAX_T2V_MODEL;
     const supportsResolution = /^MiniMax-Hailuo/i.test(model);
 
     const response = await fetch(`${MINIMAX_API_BASE_URL}/v1/video_generation`, {
@@ -1370,7 +1397,7 @@ async function createMiniMaxVideoTask(payload) {
             model,
             duration: MINIMAX_VIDEO_DURATION,
             ...(supportsResolution ? { resolution: MINIMAX_VIDEO_RESOLUTION } : {}),
-            ...payload
+            prompt
         })
     });
 
@@ -1681,8 +1708,8 @@ async function processPendingAnimationTasks() {
                 `SELECT t.*, d.title, d.content, d.scenic_spot, d.style
                  FROM diary_animation_tasks t
                  JOIN diaries d ON t.diary_id = d.id
-                 WHERE t.status = 'queued'
-                    OR (t.status = 'processing' AND t.updated_at < NOW() - INTERVAL '45 seconds')
+                 WHERE t.mode = 't2v' AND (t.status = 'queued'
+                    OR (t.status = 'processing' AND t.updated_at < NOW() - INTERVAL '45 seconds'))
                  ORDER BY CASE WHEN t.status = 'processing' THEN 0 ELSE 1 END, t.created_at ASC
                  LIMIT 1`
             );
@@ -1701,8 +1728,6 @@ async function processPendingAnimationTasks() {
             }
 
             try {
-                const mediaRows = await getDiaryMedia(task.diary_id);
-                const firstImage = mediaRows.find(item => item.media_type === 'image');
                 const diaryContent = await maybeDecompressDiaryContent(task.content);
 
                 const basePrompt = buildMiniMaxAnimationPrompt({
@@ -1711,25 +1736,6 @@ async function processPendingAnimationTasks() {
                     scenicSpot: task.scenic_spot,
                     style: task.style
                 });
-
-                let payload = { prompt: basePrompt };
-                let currentMode = task.mode || 't2v';
-
-                if (firstImage) {
-                    const base64 = await getDiaryImageAsBase64(firstImage);
-                    if (base64) {
-                        payload = {
-                            prompt: basePrompt,
-                            first_frame_image: base64,
-                            model: MINIMAX_I2V_MODEL
-                        };
-                        currentMode = 'i2v';
-                    }
-                }
-
-                if (currentMode !== task.mode) {
-                    await pool.query('UPDATE diary_animation_tasks SET mode = $1 WHERE id = $2', [currentMode, task.id]);
-                }
 
                 let minimaxTaskId = isResuming ? task.task_id : null;
                 let finishedTask = null;
@@ -1743,52 +1749,20 @@ async function processPendingAnimationTasks() {
                         throw new Error(`MiniMax 生成失败: ${resumedStatus.base_resp?.status_msg || resumedStatus.status || '未知错误'}`);
                     }
                 } else {
-                    try {
-                        minimaxTaskId = await createMiniMaxVideoTask(payload);
-                    } catch (firstErr) {
-                        if (payload.first_frame_image && isMiniMaxSensitiveError(firstErr.message)) {
-                            console.warn(`[动画任务] 任务 ${task.id} 图生视频审核未通过，降级为文生视频`);
-                            payload = { prompt: basePrompt, model: MINIMAX_T2V_MODEL };
-                            currentMode = 't2v';
-                            await pool.query('UPDATE diary_animation_tasks SET mode = $1 WHERE id = $2', [currentMode, task.id]);
-                            minimaxTaskId = await createMiniMaxVideoTask(payload);
-                        } else {
-                            throw firstErr;
-                        }
-                    }
+                    minimaxTaskId = await createMiniMaxVideoTask(basePrompt);
                 }
 
-                const selectedModel = currentMode === 'i2v' ? MINIMAX_I2V_MODEL : MINIMAX_T2V_MODEL;
+                const selectedModel = MINIMAX_T2V_MODEL;
                 await pool.query(
                     'UPDATE diary_animation_tasks SET task_id = $1, model = $2, updated_at = NOW() WHERE id = $3',
                     [minimaxTaskId, selectedModel, task.id]
                 );
 
                 if (!finishedTask) {
-                    try {
-                        finishedTask = await waitForMiniMaxVideoTask(minimaxTaskId, async () => {
-                            await pool.query('UPDATE diary_animation_tasks SET updated_at = NOW() WHERE id = $1', [task.id]);
-                        });
-                    } catch (pollErr) {
-                        if (!isResuming && payload.first_frame_image && (/超时|timeout/i.test(pollErr.message) || isMiniMaxSensitiveError(pollErr.message))) {
-                            console.warn(`[动画任务] 任务 ${task.id} 图生视频失败，降级为文生视频重试`);
-                            payload = { prompt: basePrompt, model: MINIMAX_T2V_MODEL };
-                            currentMode = 't2v';
-                            await pool.query('UPDATE diary_animation_tasks SET mode = $1 WHERE id = $2', [currentMode, task.id]);
-                            minimaxTaskId = await createMiniMaxVideoTask(payload);
-                            await pool.query(
-                                'UPDATE diary_animation_tasks SET task_id = $1, model = $2, updated_at = NOW() WHERE id = $3',
-                                [minimaxTaskId, MINIMAX_T2V_MODEL, task.id]
-                            );
-                            finishedTask = await waitForMiniMaxVideoTask(minimaxTaskId, async () => {
-                                await pool.query('UPDATE diary_animation_tasks SET updated_at = NOW() WHERE id = $1', [task.id]);
-                            });
-                        } else {
-                            throw pollErr;
-                        }
-                    }
+                    finishedTask = await waitForMiniMaxVideoTask(minimaxTaskId, async () => {
+                        await pool.query('UPDATE diary_animation_tasks SET updated_at = NOW() WHERE id = $1', [task.id]);
+                    });
                 }
-
                 await finalizeAnimationTask(task, finishedTask);
             } catch (error) {
                 console.error(`[动画任务] 任务 ${task.id} 失败:`, error.message);
@@ -1869,7 +1843,7 @@ ${weatherStr}
 
         const media = await saveDiaryMedia(createdDiaryId, files);
 
-        if (generateAnimationImage) {
+        if (generateAnimationImage && !media.some(m => m.media_type === 'image')) {
             const hasImages = media.some(m => m.media_type === 'image');
             const animationPrompt = buildMiniMaxAnimationPrompt({
                 title,
@@ -1880,7 +1854,7 @@ ${weatherStr}
                 weather,
                 photoHints: safePhotos
             });
-            await enqueueAnimationTask(createdDiaryId, user.id, animationPrompt, hasImages ? 'i2v' : 't2v');
+            await enqueueAnimationTask(createdDiaryId, user.id, animationPrompt, 't2v');
         }
 
         return { ...dbRes.rows[0], content: originalContent, media: toClientDiaryMediaRows(media) };
@@ -1924,7 +1898,7 @@ async function createDiaryRecord(user, value, files = []) {
         diaryId = dbRes.rows[0].id;
         const media = await saveDiaryMedia(diaryId, files);
 
-        if (normalizeBoolean(generateAnimationImage)) {
+        if (normalizeBoolean(generateAnimationImage) && !media.some(m => m.media_type === 'image')) {
             const hasImages = media.some(m => m.media_type === 'image');
             const animationPrompt = buildMiniMaxAnimationPrompt({
                 title: cleanTitle,
@@ -1933,7 +1907,7 @@ async function createDiaryRecord(user, value, files = []) {
                 style: diaryStyle,
                 photoHints: media.filter(m => m.media_type === 'image').map(m => m.original_name)
             });
-            await enqueueAnimationTask(diaryId, user.id, animationPrompt, hasImages ? 'i2v' : 't2v');
+            await enqueueAnimationTask(diaryId, user.id, animationPrompt, 't2v');
         }
 
         return { ...dbRes.rows[0], content: cleanContent, media: toClientDiaryMediaRows(media) };
@@ -1954,7 +1928,7 @@ app.post('/api/register', async (req, res) => {
     try {
         const { username, password } = req.body;
 
-        if (!username || !password) {
+        if (typeof username !== 'string' || !username.trim() || username.length > 50 || typeof password !== 'string' || !password || Buffer.byteLength(password) > 72) {
             return res.status(400).json({ success: false, error: '用户名和密码不能为空' });
         }
 
@@ -1987,7 +1961,7 @@ app.post('/api/login', async (req, res) => {
         const adminUsername = process.env.ADMIN_USERNAME || 'admin';
         const adminPassword = process.env.ADMIN_PASSWORD;
 
-        if (!username || !password) {
+        if (typeof username !== 'string' || !username.trim() || username.length > 50 || typeof password !== 'string' || !password || Buffer.byteLength(password) > 72) {
             return res.status(400).json({ success: false, error: '请输入用户名和密码' });
         }
 
@@ -2050,6 +2024,7 @@ app.get('/api/auth/check', async (req, res) => {
  * POST /api/logout - 退出登录（JWT 无状态，前端删除 token 即可）
  */
 app.post('/api/logout', (req, res) => {
+    res.clearCookie('smartmap_asset',{path:'/api'});
     res.json({ success: true, message: '已退出登录' });
 });
 
@@ -2080,7 +2055,7 @@ function optionalUserFromRequest(req) {
 }
 
 function normalizeDiscoverType(type) {
-    return ['spot', 'food', 'service'].includes(type) ? type : null;
+    return ['spot', 'food'].includes(type) ? type : null;
 }
 
 function parseDiscoverItemKey(rawKey) {
@@ -2225,7 +2200,7 @@ async function getDiscoverInteractionSummaries(rawKeys, currentUserId = null) {
  */
 app.put('/api/user/profile', authMiddleware, runAvatarUpload, async (req, res) => {
     try {
-        await ensureUserProfileSchema();
+
         const userId = Number(req.user?.id);
         const username = String(req.body.username || '').trim();
         const password = String(req.body.password || '').trim();
@@ -2569,6 +2544,8 @@ app.post('/api/diaries/:id/rate', authMiddleware, async (req, res) => {
             return res.status(400).json({ success: false, error: '评分必须在 1-5 之间' });
         }
 
+        const visible = await pool.query('SELECT 1 FROM diaries WHERE id=$1 AND (is_public OR user_id=$2)', [diaryId,req.user.id]);
+        if (!visible.rowCount) return res.sendStatus(404);
         // 1. 更新或插入评分记录
         await pool.query(`
             INSERT INTO diary_ratings (diary_id, user_id, rating)
@@ -2883,6 +2860,7 @@ app.post('/api/diaries/:id/animation/retry', authMiddleware, async (req, res) =>
             return res.status(403).json({ success: false, error: '只能重试自己的日记动画任务' });
         }
 
+        if (context.hasImages) return res.status(400).json({ success:false, error:'图片日记不生成视频' });
         const latestTaskRes = await pool.query(
             `SELECT id, status
              FROM diary_animation_tasks
@@ -2903,7 +2881,7 @@ app.post('/api/diaries/:id/animation/retry', authMiddleware, async (req, res) =>
             diaryId,
             req.user.id,
             context.prompt,
-            context.hasImages ? 'i2v' : 't2v'
+            't2v'
         );
 
         res.json({ success: true, message: '已重新提交旅游动画生成任务' });
@@ -3673,7 +3651,7 @@ app.get('/api/foods/nearby', async (req, res) => {
 app.post('/api/smartItinerary', async (req, res) => {
     try {
         const { spots, startHour } = req.body;
-        if (!spots || !Array.isArray(spots) || spots.length === 0) {
+        if (!Array.isArray(spots) || spots.length === 0 || spots.length > 20) {
             return res.status(400).json({ success: false, error: '需要 spots 数组' });
         }
 
@@ -3693,43 +3671,9 @@ app.post('/api/smartItinerary', async (req, res) => {
         const allFoods = dbFoods.rows;
         allFoods.forEach(assignFoodMeta);
 
-        const dbServices = await pool.query('SELECT id, type, name, lat, lng, hotness FROM travel_services');
-        const allServices = dbServices.rows;
-
-        let travelPhotoService = null;
-        if (spots.length > 0 && allServices.length > 0) {
-            const firstSpot = spots[0];
-            const sortedServices = allServices
-                .map(s => ({
-                    ...s,
-                    distance: Math.round(haversineDistance(firstSpot.lat, firstSpot.lng, s.lat, s.lng) * 100) / 100
-                }))
-                .sort((a, b) => a.distance - b.distance);
-
-            if (sortedServices.length > 0) {
-                travelPhotoService = {
-                    ...sortedServices[0],
-                    duration: TRAVEL_PHOTO_DURATION,
-                    anchorSpot: firstSpot.name
-                };
-            }
-        }
-
+        const travelPhotoService = null;
         const events = [];
         let currentHour = start;
-
-        if (travelPhotoService) {
-            events.push({
-                type: 'photo',
-                name: `旅拍：${travelPhotoService.name}`,
-                startHour: currentHour,
-                endHour: currentHour + TRAVEL_PHOTO_DURATION,
-                startLabel: formatHour(currentHour),
-                endLabel: formatHour(currentHour + TRAVEL_PHOTO_DURATION),
-                data: travelPhotoService
-            });
-            currentHour += TRAVEL_PHOTO_DURATION;
-        }
 
         const mealRecommendations = [];
 
@@ -4690,7 +4634,7 @@ app.get('/api/search', async (req, res) => {
         const keyword = q.trim();
 
         const promises = [];
-        const cats = category === 'all' ? ['poi', 'food', 'service'] : [category];
+        const cats = category === 'all' ? ['poi', 'food'] : [category];
 
         // POI search
         if (cats.includes('poi')) {
@@ -4721,29 +4665,6 @@ app.get('/api/search', async (req, res) => {
                         hotness DESC
                     LIMIT 12
                 `, [`%${keyword}%`, keyword]).then(r => ({ key: 'foods', rows: r.rows }))
-            );
-        }
-
-        // Travel Services search (妆娘/摄影师/无人机/服装租赁)
-        if (cats.includes('service')) {
-            let serviceTypeFilter = '';
-            const serviceParams = [`%${keyword}%`, keyword];
-            const serviceCats = ['makeup', 'photographer', 'drone', 'clothing'].filter(t => cats.includes(t));
-            if (serviceCats.length > 0) {
-                serviceTypeFilter = ` AND type IN (${serviceCats.map((_, i) => `$${i + 3}`).join(', ')})`;
-                serviceParams.push(...serviceCats);
-            }
-            promises.push(
-                pool.query(`
-                    SELECT DISTINCT ON (name) id, name, type, lat, lng, hotness
-                    FROM travel_services
-                    WHERE (name ILIKE $1 OR similarity(name, $2) > 0.15)${serviceTypeFilter}
-                    ORDER BY name,
-                        CASE WHEN name ILIKE $1 THEN 1 ELSE 0 END DESC,
-                        LENGTH(name) ASC,
-                        hotness DESC
-                    LIMIT 12
-                `, serviceParams).then(r => ({ key: 'services', rows: r.rows }))
             );
         }
 
@@ -4869,13 +4790,7 @@ app.get('/api/search/autocomplete', async (req, res) => {
                  ORDER BY name, LENGTH(name) ASC, hotness DESC LIMIT 5`,
                 [`%${keyword}%`]
             ),
-            runSearch(
-                '旅拍服务',
-                `SELECT DISTINCT ON (name) id, name, type, lat, lng, hotness
-                 FROM travel_services WHERE name ILIKE $1
-                 ORDER BY name, LENGTH(name) ASC, hotness DESC LIMIT 5`,
-                [`%${keyword}%`]
-            )
+            []
         ]);
 
         console.log(`[搜索-自动补全] 关键词: ${keyword}, POI: ${pois.length}, 美食: ${foods.length}, 服务: ${services.length}`);
@@ -5003,85 +4918,6 @@ app.post('/api/discover/:type/:id/reviews', authMiddleware, async (req, res) => 
  * GET /api/services
  * 优先C引擎，失败时Node.js直接排序（fallback），返回全部服务
  */
-app.get('/api/services', async (req, res) => {
-    try {
-        const { lat, lng } = req.query;
-        const userLat = parseFloat(lat);
-        const userLng = parseFloat(lng);
-        const token = req.headers.authorization?.replace('Bearer ', '');
-        let currentUser = null;
-        if (token) {
-            try { currentUser = jwt.verify(token, JWT_SECRET); } catch (e) { /* 忽略 */ }
-        }
-
-        let myBookedServiceIds = [];
-        if (currentUser) {
-            const bookingRes = await pool.query(
-                'SELECT service_id FROM bookings WHERE user_id = $1',
-                [currentUser.id]
-            );
-            myBookedServiceIds = bookingRes.rows.map(b => b.service_id);
-        }
-
-        const dbRes = await pool.query('SELECT id, type, name, lat, lng, hotness, schedule, price, address, description FROM travel_services');
-        const allServices = dbRes.rows;
-
-        if (allServices.length === 0) {
-            return res.json({ success: true, data: [] });
-        }
-
-        let finalData = null;
-
-        try {
-            let payloadText = `${lat} ${lng}\n`;
-            allServices.forEach(s => {
-                payloadText += `${s.id} ${s.type} ${s.lat} ${s.lng} ${s.hotness}\n`;
-            });
-
-            const algoData = await fetchFromCService(`${C_ALGO_SERVICE_URL}/api/services`, {
-                method: 'POST',
-                body: payloadText,
-                signal: AbortSignal.timeout(3000)
-            });
-
-            const topServices = algoData.services || [];
-            if (topServices.length > 0) {
-                finalData = topServices.map(service => {
-                    const original = allServices.find(s => s.id === service.id);
-                    return {
-                        ...original,
-                        ...service,
-                        name: original?.name || service.name,
-                        schedule: original?.schedule || service.schedule,
-                        is_booked_by_me: currentUser ? myBookedServiceIds.includes(service.id) : false
-                    };
-                });
-                console.log(`[旅拍服务] C引擎成功 top=${finalData.length}`);
-            }
-        } catch (e) {
-            console.warn(`[旅拍服务] C引擎不可用，使用数据库排序: ${e.message}`);
-        }
-
-        if (!finalData) {
-            finalData = topKSort(allServices, userLat || 39.9, userLng || 116.4, 'hotness', 10)
-                .map(service => ({
-                    ...service,
-                    is_booked_by_me: currentUser ? myBookedServiceIds.includes(service.id) : false
-                }));
-            console.log(`[旅拍服务] Node.js fallback top=${finalData.length}`);
-        }
-
-        res.json({ success: true, data: finalData });
-
-    } catch (error) {
-        console.error('[网关错误]:', error.message);
-        res.status(500).json({ success: false, error: '后端服务异常' });
-    }
-});
-
-/**
- * GET /api/services/:id/slots - 获取某服务某天的可用时间段
- */
 const WEATHER_CACHE = new Map();
 const WEATHER_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
@@ -5207,7 +5043,7 @@ app.get('/api/geocode/reverse', async (req, res) => {
 });
 
 app.use((req, res, next) => {
-    if (req.method === 'GET' && !req.path.startsWith('/api/') && !req.path.includes('.')) {
+    if (req.method === 'GET' && ['/','/login','/planner','/diary','/admin/diaries'].includes(req.path)) {
         res.sendFile(path.join(__dirname, 'dist', 'index.html'));
     } else {
         next();
@@ -5215,7 +5051,8 @@ app.use((req, res, next) => {
 });
 
 
-app.listen(PORT, process.env.HOST || '127.0.0.1', () => {
+await connectWithRetry();
+if (process.env.SMARTMAP_MIGRATE !== '1') app.listen(PORT, '127.0.0.1', () => {
     console.log(`=========================================`);
     console.log(`[Node.js API 网关] 已启动 (ESM 模式)`);
     console.log(`访问前端页面: http://localhost:${PORT}/index.html`);
