@@ -48,7 +48,7 @@
           </div>
           <div class="page-header-actions">
             <button class="page-action-btn primary" type="button" @click="fetchSmartItinerary">立即生成行程</button>
-            <router-link class="page-action-btn" to="/planner">地图选点与手动排期</router-link>
+
             <button class="page-action-btn" type="button" @click="activeMainTab = 'map'; panelOpen = true">返回地图规划</button>
           </div>
         </div>
@@ -1081,6 +1081,7 @@
 
       <div v-if="panelView === 'map'" class="sidebar-spacer"></div>
 
+      <router-link v-if="panelView === 'trip'" class="page-action-btn" to="/planner">地图选点与手动排期</router-link>
       <div v-if="panelView === 'trip' && itineraryItems.length === 0" class="itinerary-empty-standalone">
         <div class="itinerary-empty-box">
           <div class="itinerary-empty-icon">🧭</div>
@@ -12395,3 +12396,4 @@ async function handleLogout() {
 .toast-fade-enter-from { opacity: 0; transform: translateX(-50%) translateY(16px); }
 .toast-fade-leave-to { opacity: 0; transform: translateX(-50%) translateY(-8px); }
 </style>
+
