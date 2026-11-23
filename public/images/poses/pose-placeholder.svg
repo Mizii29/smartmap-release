@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="420" viewBox="0 0 640 420">
+  <rect width="640" height="420" fill="#f5f3ff"/>
+  <rect x="24" y="24" width="592" height="372" rx="20" fill="#ffffff" stroke="#e5e7eb" stroke-width="2"/>
+  <circle cx="320" cy="150" r="56" fill="#ddd6fe"/>
+  <path d="M220 320c20-72 64-110 100-110s80 38 100 110" fill="none" stroke="#c4b5fd" stroke-width="20" stroke-linecap="round"/>
+  <text x="320" y="60" text-anchor="middle" font-size="20" fill="#6b7280" font-family="system-ui, -apple-system, Segoe UI, Roboto, Arial">
+    推荐拍照姿势示意图
+  </text>
+  <text x="320" y="382" text-anchor="middle" font-size="16" fill="#9ca3af" font-family="system-ui, -apple-system, Segoe UI, Roboto, Arial">
+    可替换为真实姿势图片
+  </text>
+</svg>

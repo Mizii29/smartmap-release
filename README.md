@@ -1,9 +1,20 @@
-# SmartMap 地图行程本
+# 行摄天工 SmartMap
 
-在地图上点选位置，填写停留或服务安排的名称、当地开始时间和时长。行程按时间排列，可编辑、改位置和删除。数据保存在当前站点的浏览器存储中，清除站点数据会删除行程。服务安排仅是个人计划。
+Vue 地图、行程、发现、日记、个人中心与日记管理共用 Express 网关。PostgreSQL 保存账号、日记、媒体和社区互动。行程页支持地图选点和个人服务安排。
 
-## 部署
+## Windows 部署
 
-使用 Node.js 24，在仓库目录运行 npm ci 和 npm run build，将 dist 目录内容部署到 HTTPS 静态站点。运行 npm run preview 可在本机预览构建产物。
+准备 Node.js 24、PostgreSQL 17、MinGW GCC 和专用空数据库。在应用环境设置 DB_HOST、DB_PORT、DB_USER、DB_NAME、DB_PASSWORD 和随机 JWT_SECRET（至少 32 字符）。PORT 默认 3000，HOST 默认 127.0.0.1。ADMIN_USERNAME 和独立 ADMIN_PASSWORD 用于启用管理员登录。AI 写作、拍摄建议及动画需要服务端的 QWEN_API_KEY、MINIMAX_API_KEY，网络检索可选 TAVILY_API_KEY。
 
-底图默认使用 OpenStreetMap 标准栅格瓦片。部署前按预期访问量选择可用的瓦片服务，并检查供应商的使用条件和署名要求。可在构建环境设置 VITE_TILE_URL（含 {z}、{x}、{y}）与 VITE_TILE_ATTRIBUTION。两项均会进入公开客户端，署名 HTML 仅允许由站点维护方配置。
+~~~powershell
+npm ci
+npm run build
+gcc -O2 algo_server.c astar.c road_network.c multi_route.c style_recommend.c travel_time.c -lws2_32 -o algo_server.exe
+gcc -O2 huffman_server.c huffman.c -lws2_32 -o huffman_server.exe
+~~~
+
+在项目根目录分别启动两个 exe 和 npm start。首次连接数据库完成建表后执行 node import-places.js。通过网关端口打开网站，公网部署需要 HTTPS 和服务守护。
+
+## 地图数据
+
+地点与餐饮从原项目北京 OpenStreetMap 快照提取，保留节点编号，路网沿用原项目道路。数据 © OpenStreetMap contributors，按 [Open Database License](https://www.openstreetmap.org/copyright) 提供。快照无法反映实时营业或路况。第三方图片的公网展示授权待核验。
